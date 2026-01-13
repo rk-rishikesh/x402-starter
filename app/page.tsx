@@ -13,7 +13,10 @@ import {
   Info,
   AlertCircle
 } from "lucide-react";
-import { wrapFetchWithPayment, decodeXPaymentResponse } from "x402-fetch";
+import { x402Client, wrapFetchWithPayment, decodePaymentResponseHeader } from "@x402/fetch";
+import { registerExactEvmScheme } from "@x402/evm/exact/client";
+
+
 import { createWalletClient, http } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { baseSepolia } from 'viem/chains';
@@ -45,17 +48,11 @@ export default function DemoPage() {
         ? DEMO_PRIVATE_KEY 
         : `0x${DEMO_PRIVATE_KEY}`;
 
-      const account = privateKeyToAccount(normalizedPrivateKey as `0x${string}`);
-      const client = createWalletClient({
-        account,
-        chain: baseSepolia,
-        transport: http()
-      });
-
-      setWalletAddress(account.address);
-      
-      // Use type assertion since viem wallet client is compatible with x402 Signer at runtime
-      const wrappedFetch = wrapFetchWithPayment(fetch, client as unknown as Signer);
+      const signer = privateKeyToAccount(normalizedPrivateKey as `0x${string}`);
+      const x402client = new x402Client();
+      registerExactEvmScheme(x402client, { signer });
+      const wrappedFetch = wrapFetchWithPayment(fetch, x402client);
+      setWalletAddress(signer.address);
       setFetchWithPayment(() => wrappedFetch);
     } catch (err: any) {
       setError(`Failed to initialize wallet: ${err.message}`);
@@ -78,11 +75,8 @@ export default function DemoPage() {
       
       const result = await fetchWithPayment(API_URL, {
         method: "GET",
-        headers: {
-          'Content-Type': 'application/json',
-        },
       });
-      
+
       const endTime = performance.now();
       const totalTime = Math.round(endTime - startTime);
 
@@ -90,27 +84,47 @@ export default function DemoPage() {
         throw new Error(`Request failed with status ${result.status}: ${result.statusText}`);
       }
 
-      const body = await result.json();
+      // Check if response has content before parsing JSON
+      const contentType = result.headers.get("content-type") || "";
+      const isJson = contentType.includes("application/json");
       
-      // Decode payment response header if present
-      const rawPaymentResponse = result.headers.get("x-payment-response");
-      let paymentInfo = null;
-      let transactionHash = null;
+      let data: any = null;
+      let textContent: string | null = null;
+
+      // Read response body once
+      const responseText = await result.text().catch(() => "");
       
-      if (rawPaymentResponse) {
+      if (isJson && responseText.trim()) {
         try {
-          paymentInfo = decodeXPaymentResponse(rawPaymentResponse);
-          transactionHash = paymentInfo?.transaction || null;
-        } catch (e) {
-          console.error('Error decoding payment response:', e);
+          data = JSON.parse(responseText);
+        } catch (jsonError) {
+          console.error("Error parsing JSON:", jsonError);
+          textContent = responseText;
         }
+      } else if (responseText) {
+        textContent = responseText;
       }
 
+      // Extract payment response header if present
+      let paymentInfo = null;
+      let transactionHash = null;
+      const paymentResponse = result.headers.get("PAYMENT-RESPONSE");
+      if (paymentResponse) {
+        try {
+          const decoded = decodePaymentResponseHeader(paymentResponse);
+          paymentInfo = decoded;
+          transactionHash = (decoded as any)?.transaction || null;
+        } catch (e) {
+          console.error("Error decoding payment response:", e);
+        }
+      }
+      
       setResponse({
         status: result.status,
         statusText: result.statusText,
         headers: Object.fromEntries(result.headers.entries()),
-        body,
+        body: data,
+        textContent,
         transactionHash,
         paymentInfo,
       });
@@ -155,7 +169,7 @@ export default function DemoPage() {
         <div className="max-w-md mx-auto px-6">
           <div className="rounded-xl border border-red-200 bg-red-50 p-6">
             <div className="flex items-start gap-3">
-              <AlertCircle className="w-5 h-5 text-red-600 mt-0.5 flex-shrink-0" />
+              <AlertCircle className="w-5 h-5 text-red-600 mt-0.5 shrink-0" />
               <div>
                 <h3 className="font-semibold text-red-900 mb-1">Configuration Error</h3>
                 <p className="text-sm text-red-700">
@@ -208,7 +222,7 @@ export default function DemoPage() {
                     
                     <div className="bg-zinc-50 rounded-lg p-4 mb-6 border border-zinc-100">
                       <div className="flex items-start gap-3">
-                        <Info className="w-4 h-4 text-zinc-500 mt-0.5 flex-shrink-0" />
+                        <Info className="w-4 h-4 text-zinc-500 mt-0.5 shrink-0" />
                         <p className="text-xs text-zinc-500">
                           Open DevTools Network tab to see 2 requests: first without payment (gets 402), then with payment (gets data)
                         </p>
@@ -341,7 +355,7 @@ export default function DemoPage() {
                 {error && (
                   <div className="mb-6 rounded-lg border border-red-200 bg-red-50 p-4">
                     <div className="flex items-start gap-3">
-                      <AlertCircle className="w-4 h-4 text-red-600 mt-0.5 flex-shrink-0" />
+                      <AlertCircle className="w-4 h-4 text-red-600 mt-0.5 shrink-0" />
                       <div>
                         <p className="text-sm font-medium text-red-900 mb-1">Error</p>
                         <p className="text-xs text-red-700">{error}</p>
