@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { 
   CheckCircle, 
   ArrowRight, 
@@ -14,60 +14,89 @@ import {
   AlertCircle
 } from "lucide-react";
 import { x402Client, wrapFetchWithPayment, decodePaymentResponseHeader } from "@x402/fetch";
+import type { SettleResponse } from "@x402/core/types";
 import { registerExactEvmScheme } from "@x402/evm/exact/client";
 
 
-import { createWalletClient, http } from 'viem';
-import { privateKeyToAccount } from 'viem/accounts';
-import { baseSepolia } from 'viem/chains';
-import type { Signer } from 'x402/types';
+import { privateKeyToAccount } from "viem/accounts";
+
+const DEMO_PRIVATE_KEY = process.env.NEXT_PUBLIC_PRIVATE_KEY;
+
+type DemoResponse = {
+  status?: number;
+  statusText?: string;
+  headers?: Record<string, string>;
+  body?: unknown;
+  textContent?: string | null;
+  transactionHash?: string | null;
+  paymentInfo?: SettleResponse | null;
+  error?: string;
+  details?: unknown;
+};
+
+/** Narrows an unknown caught value to a readable message. */
+function errorMessageOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+type Wallet = {
+  address?: `0x${string}`;
+  fetchWithPayment?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+  error?: string;
+};
+
+/**
+ * Builds the paying fetch wrapper. NEXT_PUBLIC_* is inlined at build time, so
+ * this is a constant and is computed once per module rather than per render.
+ */
+function createWallet(): Wallet {
+  if (!DEMO_PRIVATE_KEY) {
+    return { error: "NEXT_PUBLIC_PRIVATE_KEY is not set in environment variables" };
+  }
+
+  try {
+    // Normalize private key to ensure it has 0x prefix
+    const normalizedPrivateKey = DEMO_PRIVATE_KEY.startsWith("0x")
+      ? DEMO_PRIVATE_KEY
+      : `0x${DEMO_PRIVATE_KEY}`;
+
+    const signer = privateKeyToAccount(normalizedPrivateKey as `0x${string}`);
+    const x402client = new x402Client();
+    registerExactEvmScheme(x402client, { signer });
+    return {
+      address: signer.address,
+      fetchWithPayment: wrapFetchWithPayment(fetch, x402client),
+    };
+  } catch (err: unknown) {
+    return { error: `Failed to initialize wallet: ${errorMessageOf(err)}` };
+  }
+}
+
+const wallet = createWallet();
 
 export default function DemoPage() {
   const [loading, setLoading] = useState(false);
-  const [response, setResponse] = useState<any>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [response, setResponse] = useState<DemoResponse | null>(null);
+  const [requestError, setRequestError] = useState<string | null>(null);
   const [step, setStep] = useState<"initial" | "success">("initial");
-  const [timing, setTiming] = useState<any>(null);
-  const [walletAddress, setWalletAddress] = useState<string | null>(null);
-  const [fetchWithPayment, setFetchWithPayment] = useState<((input: RequestInfo, init?: RequestInit) => Promise<Response>) | null>(null);
+  const [timing, setTiming] = useState<{ total: number } | null>(null);
 
-  const DEMO_PRIVATE_KEY = process.env.NEXT_PUBLIC_PRIVATE_KEY;
   const API_URL = process.env.NEXT_PUBLIC_QUICKSTART_RESOURCE_URL || 
     (typeof window !== 'undefined' ? `${window.location.origin}/api/premium/weather` : '/api/premium/weather');
 
-  // Initialize wallet client and fetch wrapper
-  useEffect(() => {
-    if (!DEMO_PRIVATE_KEY) {
-      setError("NEXT_PUBLIC_PRIVATE_KEY is not set in environment variables");
-      return;
-    }
-
-    try {
-      // Normalize private key to ensure it has 0x prefix
-      const normalizedPrivateKey = DEMO_PRIVATE_KEY.startsWith('0x') 
-        ? DEMO_PRIVATE_KEY 
-        : `0x${DEMO_PRIVATE_KEY}`;
-
-      const signer = privateKeyToAccount(normalizedPrivateKey as `0x${string}`);
-      const x402client = new x402Client();
-      registerExactEvmScheme(x402client, { signer });
-      const wrappedFetch = wrapFetchWithPayment(fetch, x402client);
-      setWalletAddress(signer.address);
-      setFetchWithPayment(() => wrappedFetch);
-    } catch (err: any) {
-      setError(`Failed to initialize wallet: ${err.message}`);
-    }
-  }, [DEMO_PRIVATE_KEY]);
+  const walletAddress = wallet.address ?? null;
+  const fetchWithPayment = wallet.fetchWithPayment ?? null;
+  const error = wallet.error ?? requestError;
 
   const makeRequest = async () => {
     if (!fetchWithPayment) {
-      setError("Wallet not initialized");
+      setRequestError("Wallet not initialized");
       return;
     }
 
     setLoading(true);
     setResponse(null);
-    setError(null);
+    setRequestError(null);
     setTiming(null);
 
     try {
@@ -88,7 +117,7 @@ export default function DemoPage() {
       const contentType = result.headers.get("content-type") || "";
       const isJson = contentType.includes("application/json");
       
-      let data: any = null;
+      let data: unknown = null;
       let textContent: string | null = null;
 
       // Read response body once
@@ -105,15 +134,14 @@ export default function DemoPage() {
         textContent = responseText;
       }
 
-      // Extract payment response header if present
-      let paymentInfo = null;
-      let transactionHash = null;
+      // The facilitator reports settlement back in this header.
+      let paymentInfo: SettleResponse | null = null;
+      let transactionHash: string | null = null;
       const paymentResponse = result.headers.get("PAYMENT-RESPONSE");
       if (paymentResponse) {
         try {
-          const decoded = decodePaymentResponseHeader(paymentResponse);
-          paymentInfo = decoded;
-          transactionHash = (decoded as any)?.transaction || null;
+          paymentInfo = decodePaymentResponseHeader(paymentResponse);
+          transactionHash = paymentInfo.transaction || null;
         } catch (e) {
           console.error("Error decoding payment response:", e);
         }
@@ -136,20 +164,20 @@ export default function DemoPage() {
       if (result.status === 200) {
         setStep("success");
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Request error:', err);
-      const errorMessage = err.message || String(err);
+      const errorMessage = errorMessageOf(err);
       
       // Handle network errors
       if (errorMessage.includes('Failed to fetch') || errorMessage.includes('NetworkError')) {
-        setError(`Network error: Unable to connect to ${API_URL}. Please check if the server is running and accessible.`);
+        setRequestError(`Network error: Unable to connect to ${API_URL}. Please check if the server is running and accessible.`);
       } else {
-        setError(errorMessage);
+        setRequestError(errorMessage);
       }
       
       setResponse({
         error: errorMessage,
-        details: err.cause || err.stack,
+        details: err instanceof Error ? (err.cause ?? err.stack) : undefined,
       });
     } finally {
       setLoading(false);
@@ -159,7 +187,7 @@ export default function DemoPage() {
   const reset = () => {
     setStep("initial");
     setResponse(null);
-    setError(null);
+    setRequestError(null);
     setTiming(null);
   };
 
@@ -217,7 +245,7 @@ export default function DemoPage() {
                 {step === "initial" ? (
                   <>
                     <p className="text-zinc-600 text-sm mb-4">
-                      Click below to access the protected weather API. The x402-fetch wrapper will automatically handle the payment if required!
+                      Click below to access the protected weather API. The @x402/fetch wrapper handles the 402 and payment automatically.
                     </p>
                     
                     <div className="bg-zinc-50 rounded-lg p-4 mb-6 border border-zinc-100">
@@ -312,7 +340,7 @@ export default function DemoPage() {
               <div className="p-6 border-b border-zinc-100">
                 <h2 className="text-lg font-semibold text-zinc-900 flex items-center gap-2">
                   <Zap className="w-4 h-4 text-zinc-500" />
-                  How x402-fetch Works
+                  How @x402/fetch Works
                 </h2>
               </div>
               <div className="p-6">
@@ -321,7 +349,7 @@ export default function DemoPage() {
                     { title: 'Initial Request', desc: 'Tries to access resource (no payment)' },
                     { title: '402 Detection', desc: 'Server returns 402 with payment spec' },
                     { title: 'Extract Requirements', desc: 'Gets network, amount, recipient' },
-                    { title: 'Build & Sign', desc: 'Creates and signs Base Sepolia transaction' },
+                    { title: 'Build & Sign', desc: 'Signs a USDC transfer authorization (no gas needed)' },
                     { title: 'Retry with Payment', desc: 'Resends request with X-PAYMENT header' },
                     { title: 'Verify & Settle', desc: 'Facilitator verifies and settles' },
                   ].map((item, i) => (
@@ -335,7 +363,7 @@ export default function DemoPage() {
                   ))}
                 </ol>
                 <p className="text-xs text-zinc-400 mt-4 p-3 bg-zinc-50 rounded-lg border border-zinc-100">
-                  Just call wrapFetchWithPayment(fetch, walletClient) - that&apos;s it!
+                  Just call wrapFetchWithPayment(fetch, client) &mdash; that&apos;s it!
                 </p>
               </div>
             </div>

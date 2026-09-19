@@ -3,7 +3,7 @@ import { NextResponse } from 'next/server';
 
 export const dynamic = 'force-dynamic';
 
-export async function GET(request: Request) {
+export async function GET() {
   try {
     // This code only runs AFTER payment is verified and settled
     
@@ -27,10 +27,13 @@ export async function GET(request: Request) {
     };
     
     return NextResponse.json(weatherData);
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Error in weather API route:', error);
     return NextResponse.json(
-      { error: 'Internal server error', details: error.message },
+      {
+        error: 'Internal server error',
+        details: error instanceof Error ? error.message : String(error),
+      },
       { status: 500 }
     );
   }
